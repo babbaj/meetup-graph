@@ -6,7 +6,7 @@ use std::sync::Arc;
 use csv::StringRecord;
 use neo4rs::{BoltMap, BoltNode, BoltType, ConfigBuilder, Graph, query, Row};
 use serenity::{async_trait, Client};
-use serenity::all::{CommandOptionType, CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage, GuildId, Interaction, ResolvedOption, ResolvedValue};
+use serenity::all::{CommandInteraction, CommandOptionType, CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage, GuildId, Interaction, ResolvedOption, ResolvedValue};
 use serenity::builder::{CreateAttachment, CreateCommand};
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
@@ -35,9 +35,14 @@ fn parse_relation(row: &Row) -> (String, String) {
     return (a, b)
 }
 
-fn parse_all_relations(row: &Row) -> Vec<String> {
+fn row_attrs(row: &Row) -> &BoltMap {
     // attributes is private, there is no proper way to iterate over a row
     let map = unsafe { transmute::<&Row, &BoltMap>(row) };
+    return map;
+}
+
+fn parse_all_relations(row: &Row) -> Vec<String> {
+    let map = row_attrs(row);
     let mut out = vec![];
     for value in map.value.values() {
         if let BoltType::Node(node) = value {
@@ -88,28 +93,45 @@ async fn import_csv(graph: &Graph) {
     }
 }
 
+async fn defer(ctx: &Context, command: &CommandInteraction) {
+    command.create_response(&ctx.http, CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new())).await.unwrap();
+}
+
 struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::Command(command) = interaction {
-            command.create_response(&ctx.http, CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new())).await.unwrap();
-
             let data = ctx.data.read().await;
 
-            let response = match command.data.name.as_str() {
-                "graph" => graph_command(&data.get::<BotState>().unwrap().graph, &command.data.options()).await,
-                _ => Err("Command doesn't exist".to_owned()),
-            };
-            let followup = match response {
-                Ok(bytes) => CreateInteractionResponseFollowup::new().add_file(CreateAttachment::bytes(bytes, "graph.png")),
-                Err(msg) => CreateInteractionResponseFollowup::new().content(msg)
-            };
+            let graph = &data.get::<BotState>().unwrap().graph;
+            match command.data.name.as_str() {
+                "graph" => {
+                    defer(&ctx, &command).await;
+                    let followup = match graph_command(graph, &command.data.options()).await {
+                        Ok(bytes) => CreateInteractionResponseFollowup::new().add_file(CreateAttachment::bytes(bytes, "graph.png")),
+                        Err(msg) => CreateInteractionResponseFollowup::new().content(msg)
+                    };
+                    if let Err(why) = command.create_followup(&ctx.http, followup).await {
+                        println!("Cannot respond to slash command: {why}");
+                    }
+                },
+                "query" => {
+                    defer(&ctx, &command).await;
+                    let text = query_command(&command.data.options()).await;
+                    let response = if text.len() > 1990 {
+                        CreateInteractionResponseFollowup::new().add_file(CreateAttachment::bytes(text.as_bytes(), "response.txt"))
+                    } else {
+                        CreateInteractionResponseFollowup::new().content(format!("```\n{}```", text))
+                    };
 
-            if let Err(why) = command.create_followup(&ctx.http, followup).await {
-                println!("Cannot respond to slash command: {why}");
-            }
+                    if let Err(why) = command.create_followup(&ctx.http, response).await {
+                        println!("Cannot respond to slash command: {why}");
+                    }
+                }
+                _ => command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("Command doesn't exist"))).await.unwrap()
+            };
         }
     }
 
@@ -117,7 +139,7 @@ impl EventHandler for Handler {
         println!("{} is connected!", ready.user.name);
         let guild_id = GuildId::new(537881812249083905);
 
-        let cmd = CreateCommand::new("graph")
+        let graph_cmd = CreateCommand::new("graph")
             .description("query and render a subset of the graph")
             .add_option(CreateCommandOption::new(
                 CommandOptionType::String,
@@ -130,7 +152,14 @@ impl EventHandler for Handler {
                 "extra_args",
                 "extra args to pass to graphviz"
             ));
-        guild_id.set_commands(&ctx.http, vec![cmd]).await.unwrap();
+        let query_cmd = CreateCommand::new("query")
+            .description("Query the neo4j database")
+            .add_option(CreateCommandOption::new(
+                CommandOptionType::String,
+                "query",
+                "neo4j cypher query",
+            ).required(true));
+        guild_id.set_commands(&ctx.http, vec![graph_cmd, query_cmd]).await.unwrap();
     }
 }
 
@@ -180,6 +209,31 @@ async fn graph_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> Result<
     } else {
         return Err("missing query argument".to_owned());
     }
+}
+
+async fn query_command(options: &[ResolvedOption<'_>]) -> String {
+    if let ResolvedValue::String(query) = options.iter().find(|opt| opt.name == "query").unwrap().value {
+        let proc = Command::new("cypher-shell")
+            .arg("--format=verbose")
+            .arg("-u=neo4j")
+            .arg("-p=meowmeowmeow")
+            .arg("-d=meetups")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to start subprocess");
+
+        let _ = thread::scope(|_| {
+            proc.stdin.unwrap().write_all(query.as_bytes()).unwrap();
+        });
+
+        let mut out = Vec::<u8>::new();
+        proc.stdout.unwrap().read_to_end(&mut out).unwrap();
+        proc.stderr.unwrap().read_to_end(&mut out).unwrap();
+        return String::from_utf8(out).unwrap();
+    }
+    return "Missing argument".to_owned();
 }
 
 async fn discord_bot(graph: Arc<Graph>) {
