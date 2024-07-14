@@ -79,12 +79,10 @@ async fn export_graph_to_dot(graph: &Graph) -> String {
 }
 
 async fn import_csv(graph: &Graph) {
-    let _ = graph.execute(query("MATCH (n) DETACH DELETE n")).await.unwrap();
+    let mut result = graph.execute(query("MATCH (n) DETACH DELETE n")).await.unwrap();
+    while let Some(_) = result.next().await.unwrap() {}
 
     let mut rdr = csv::Reader::from_reader(io::stdin());
-    for h in rdr.headers() {
-        //eprintln!("{:?}", h);
-    }
 
     for result in rdr.records() {
         // The iterator yields Result<StringRecord, Error>, so we check the
@@ -92,7 +90,6 @@ async fn import_csv(graph: &Graph) {
         let record = result.unwrap();
         let (_, people) = parse_row(&record);
         insert_group(&graph, &people).await;
-        //println!("{:?}", (event, people));
     }
 }
 
@@ -120,7 +117,7 @@ impl EventHandler for Handler {
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
-        let guild_id = GuildId::new(69);
+        let guild_id = GuildId::new(537881812249083905);
 
         let cmd = CreateCommand::new("graph")
             .description("query and render a subset of the graph")
@@ -129,7 +126,12 @@ impl EventHandler for Handler {
                 "query",
                 "neo4j cypher query",
                 ).required(true)
-            );
+            )
+            .add_option(CreateCommandOption::new(
+                CommandOptionType::String,
+                "extra_args",
+                "extra args to pass to graphviz"
+            ));
         guild_id.set_commands(&ctx.http, vec![cmd]).await.unwrap();
     }
 }
@@ -142,8 +144,10 @@ impl TypeMapKey for BotState {
     type Value = BotState;
 }
 
-async fn invoke_graphviz(data: &str) -> Vec<u8> {
-    let mut proc = Command::new("dot").arg("-Tpng")
+async fn invoke_graphviz(data: &str, extra_args: &[String]) -> Vec<u8> {
+    let mut proc = Command::new("dot")
+        .arg("-Tpng")
+        .args(extra_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -167,8 +171,12 @@ async fn graph_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> CreateI
             let nodes = parse_all_relations(&row);
             relations.push(nodes);
         }
+        let extra_args = options.iter()
+            .find(|opt| opt.name == "extra_args").map(|opt| if let ResolvedValue::String(x) = opt.value { x } else { panic!("troll arg") } )
+            .map(|s| s.split(" ").map(|s| s.to_owned()).collect::<Vec<String>>())
+            .unwrap_or(vec![]);
         let dot = export_dot(&relations).await;
-        let png = invoke_graphviz(&dot).await;
+        let png = invoke_graphviz(&dot, &extra_args).await;
 
         return CreateInteractionResponseFollowup::new().add_file(CreateAttachment::bytes(png, "graph.png"));
     } else {
@@ -203,33 +211,12 @@ async fn main() {
         .unwrap();
     let graph = Arc::new(Graph::connect(config).await.unwrap());
 
-    discord_bot(graph).await;
-    return;
-
-    let cmd = std::env::args().next().expect("Expected argument");
+    let cmd = std::env::args().nth(1).expect("Expected argument");
 
     match cmd.to_lowercase().as_str() {
+        "discord" => discord_bot(graph).await,
         "import" => import_csv(&graph).await,
         "export" => println!("{}", export_graph_to_dot(&graph).await),
         _ => panic!("invalid command")
     };
-
-    let dot = export_graph_to_dot(&graph).await;
-    File::create("graph.dot").unwrap().write_all(dot.as_bytes()).unwrap();
-    return;
-
-    let mut result = graph.execute(query("MATCH (n)-[]->(m) RETURN n, m")).await.unwrap();
-
-    /*let mut n = 0;
-    while let Ok(Some(row)) = result.next().await {
-        n += 1;
-        //println!("{:?}", row);
-
-        let (a, b) = parse_relation(&row);
-        /*let name = row.get::<BoltMap>("n").unwrap()
-            .get::<String>("name").unwrap();*/
-        println!("{} - {}", a, b);
-    }
-    println!("{}", n);
-    return;*/
 }
