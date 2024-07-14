@@ -105,11 +105,14 @@ impl EventHandler for Handler {
 
             let response = match command.data.name.as_str() {
                 "graph" => graph_command(&data.get::<BotState>().unwrap().graph, &command.data.options()).await,
-                _ => CreateInteractionResponseFollowup::new().content("Command doesn't exist"),
+                _ => Err("Command doesn't exist".to_owned()),
+            };
+            let followup = match response {
+                Ok(bytes) => CreateInteractionResponseFollowup::new().add_file(CreateAttachment::bytes(bytes, "graph.png")),
+                Err(msg) => CreateInteractionResponseFollowup::new().content(msg)
             };
 
-            let builder: CreateInteractionResponseFollowup = response.into();
-            if let Err(why) = command.create_followup(&ctx.http, builder).await {
+            if let Err(why) = command.create_followup(&ctx.http, followup).await {
                 println!("Cannot respond to slash command: {why}");
             }
         }
@@ -163,9 +166,9 @@ async fn invoke_graphviz(data: &str, extra_args: &[String]) -> Vec<u8> {
     return png_data;
 }
 
-async fn graph_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> CreateInteractionResponseFollowup {
+async fn graph_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> Result<Vec<u8>, String> {
     if let ResolvedValue::String(arg) = options.iter().find(|opt| opt.name == "query").unwrap().value {
-        let mut result = graph.execute(query(arg)).await.unwrap();
+        let mut result = graph.execute(query(arg)).await.map_err(|e| format!("{:?}", e))?;
         let mut relations = Vec::<Vec<String>>::new();
         while let Ok(Some(row)) = result.next().await {
             let nodes = parse_all_relations(&row);
@@ -178,15 +181,15 @@ async fn graph_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> CreateI
         let dot = export_dot(&relations).await;
         let png = invoke_graphviz(&dot, &extra_args).await;
 
-        return CreateInteractionResponseFollowup::new().add_file(CreateAttachment::bytes(png, "graph.png"));
+        return Ok(png);
     } else {
-        return CreateInteractionResponseFollowup::new().content("missing query argument");
+        return Err("missing query argument".to_owned());
     }
 }
 
 async fn discord_bot(graph: Arc<Graph>) {
     let token = std::env::var("DISCORD_TOKEN").expect("Missing discord token env variable");
-    let mut client = Client::builder(token, GatewayIntents::privileged() | GatewayIntents::non_privileged())
+    let mut client = Client::builder(token, GatewayIntents::MESSAGE_CONTENT)
         .event_handler(Handler)
         .await.unwrap();
     let mut data = client.data.write().await;
