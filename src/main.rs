@@ -1,20 +1,15 @@
 use std::{io, thread};
-use std::fs::File;
 use std::io::{Read, Write};
 use std::mem::transmute;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use csv::StringRecord;
-use neo4rs::{BoltMap, BoltNode, BoltType, ConfigBuilder, Graph, Node, query, Row, RowStream};
+use neo4rs::{BoltMap, BoltNode, BoltType, ConfigBuilder, Graph, query, Row};
 use serenity::{async_trait, Client};
-use serenity::all::{CommandInteraction, CommandOptionType, CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage, GuildId, Interaction, ResolvedOption, ResolvedValue};
+use serenity::all::{CommandOptionType, CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage, GuildId, Interaction, ResolvedOption, ResolvedValue};
 use serenity::builder::{CreateAttachment, CreateCommand};
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
-
-struct Event {
-    meetups: Vec<Vec<String>>
-}
 
 fn parse_row(row: &StringRecord) -> (Option<String>, Vec<String>) {
     let mut iter = row.iter().skip(3);
@@ -97,7 +92,7 @@ struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn interaction_create(&self, mut ctx: Context, interaction: Interaction) {
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::Command(command) = interaction {
             command.create_response(&ctx.http, CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new())).await.unwrap();
 
@@ -148,7 +143,7 @@ impl TypeMapKey for BotState {
 }
 
 async fn invoke_graphviz(data: &str, extra_args: &[String]) -> Vec<u8> {
-    let mut proc = Command::new("dot")
+    let proc = Command::new("dot")
         .arg("-Tpng")
         .args(extra_args)
         .stdin(Stdio::piped())
@@ -156,7 +151,7 @@ async fn invoke_graphviz(data: &str, extra_args: &[String]) -> Vec<u8> {
         .spawn()
         .expect("Failed to start subprocess");
 
-    let h = thread::scope(|_| {
+    let _ = thread::scope(|_| {
         proc.stdin.unwrap().write_all(data.as_bytes()).unwrap();
     });
 
