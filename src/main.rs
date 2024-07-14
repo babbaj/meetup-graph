@@ -20,7 +20,7 @@ fn parse_row(row: &StringRecord) -> (Option<String>, Vec<String>) {
 }
 
 async fn insert_group(graph: &Graph, people: &[String]) {
-    let query = query("UNWIND $names AS n1 UNWIND $names AS n2 WITH n1, n2 WHERE n1 <> n2 MERGE (p1 {name: n1}) MERGE (p2 {name: n2}) MERGE (p1)-[:MET]-(p2)").param("names", people);
+    let query = query("UNWIND $names AS n1 UNWIND $names AS n2 WITH n1, n2 WHERE n1 <> n2 MERGE (p1 {name: toLower(n1)}) MERGE (p2 {name: toLower(n2)}) MERGE (p1)-[:MET]-(p2)").param("names", people);
     let mut rows = graph.execute(query).await.unwrap();
     while let Ok(Some(row)) = rows.next().await {
         eprintln!("{:?}", row);
@@ -97,6 +97,16 @@ async fn defer(ctx: &Context, command: &CommandInteraction) {
     command.create_response(&ctx.http, CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new())).await.unwrap();
 }
 
+async fn render_graph_followup(result: Result<Vec<u8>, String>, ctx: &Context, command: &CommandInteraction) {
+    let followup = match result {
+        Ok(bytes) => CreateInteractionResponseFollowup::new().add_file(CreateAttachment::bytes(bytes, "graph.png")),
+        Err(msg) => CreateInteractionResponseFollowup::new().content(msg)
+    };
+    if let Err(why) = command.create_followup(&ctx.http, followup).await {
+        println!("Cannot respond to slash command: {why}");
+    }
+}
+
 struct Handler;
 
 #[async_trait]
@@ -109,14 +119,12 @@ impl EventHandler for Handler {
             match command.data.name.as_str() {
                 "graph" => {
                     defer(&ctx, &command).await;
-                    let followup = match graph_command(graph, &command.data.options()).await {
-                        Ok(bytes) => CreateInteractionResponseFollowup::new().add_file(CreateAttachment::bytes(bytes, "graph.png")),
-                        Err(msg) => CreateInteractionResponseFollowup::new().content(msg)
-                    };
-                    if let Err(why) = command.create_followup(&ctx.http, followup).await {
-                        println!("Cannot respond to slash command: {why}");
-                    }
+                    render_graph_followup(graph_command(graph, &command.data.options()).await, &ctx, &command).await;
                 },
+                "graphquery" => {
+                    defer(&ctx, &command).await;
+                    render_graph_followup(graph_query_command(graph, &command.data.options()).await, &ctx, &command).await;
+                }
                 "query" => {
                     defer(&ctx, &command).await;
                     let text = query_command(&command.data.options()).await;
@@ -137,21 +145,30 @@ impl EventHandler for Handler {
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
-        let guild_id = GuildId::new(537881812249083905);
+        let guild_id = GuildId::new(343851086026637313);
 
+        let extra_args = CreateCommandOption::new(
+            CommandOptionType::String,
+            "extra_args",
+            "extra args to pass to graphviz"
+        );
         let graph_cmd = CreateCommand::new("graph")
+            .description("Render only the connections to a specific person")
+            .add_option(CreateCommandOption::new(
+                CommandOptionType::String,
+                "who",
+                "the person",
+            ).required(true))
+            .add_option(extra_args.clone());
+        let graph_query_cmd = CreateCommand::new("graphquery")
             .description("query and render a subset of the graph")
             .add_option(CreateCommandOption::new(
                 CommandOptionType::String,
                 "query",
                 "neo4j cypher query",
-                ).required(true)
+            ).required(true)
             )
-            .add_option(CreateCommandOption::new(
-                CommandOptionType::String,
-                "extra_args",
-                "extra args to pass to graphviz"
-            ));
+            .add_option(extra_args.clone());
         let query_cmd = CreateCommand::new("query")
             .description("Query the neo4j database")
             .add_option(CreateCommandOption::new(
@@ -159,7 +176,7 @@ impl EventHandler for Handler {
                 "query",
                 "neo4j cypher query",
             ).required(true));
-        guild_id.set_commands(&ctx.http, vec![graph_cmd, query_cmd]).await.unwrap();
+        guild_id.set_commands(&ctx.http, vec![graph_cmd, graph_query_cmd, query_cmd]).await.unwrap();
     }
 }
 
@@ -190,24 +207,37 @@ async fn invoke_graphviz(data: &str, extra_args: &[String]) -> Vec<u8> {
     return png_data;
 }
 
-async fn graph_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> Result<Vec<u8>, String> {
-    if let ResolvedValue::String(arg) = options.iter().find(|opt| opt.name == "query").unwrap().value {
-        let mut result = graph.execute(query(arg)).await.map_err(|e| format!("{:?}", e))?;
-        let mut relations = Vec::<Vec<String>>::new();
-        while let Ok(Some(row)) = result.next().await {
-            let nodes = parse_all_relations(&row);
-            relations.push(nodes);
-        }
-        let extra_args = options.iter()
-            .find(|opt| opt.name == "extra_args").map(|opt| if let ResolvedValue::String(x) = opt.value { x } else { panic!("troll arg") } )
-            .map(|s| s.split(" ").map(|s| s.to_owned()).collect::<Vec<String>>())
-            .unwrap_or(vec![]);
-        let dot = export_dot(&relations).await;
-        let png = invoke_graphviz(&dot, &extra_args).await;
+async fn generate_graph(graph: &Graph, query: neo4rs::Query, options: &[ResolvedOption<'_>]) -> Result<Vec<u8>, String> {
+    let mut result = graph.execute(query).await.map_err(|e| format!("{:?}", e))?;
+    let mut relations = Vec::<Vec<String>>::new();
+    while let Ok(Some(row)) = result.next().await {
+        let nodes = parse_all_relations(&row);
+        relations.push(nodes);
+    }
+    let extra_args = options.iter()
+        .find(|opt| opt.name == "extra_args").map(|opt| if let ResolvedValue::String(x) = opt.value { x } else { panic!("troll arg") } )
+        .map(|s| s.split(" ").map(|s| s.to_owned()).collect::<Vec<String>>())
+        .unwrap_or(vec![]);
+    let dot = export_dot(&relations).await;
+    let png = invoke_graphviz(&dot, &extra_args).await;
 
-        return Ok(png);
+    return Ok(png);
+}
+
+async fn graph_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> Result<Vec<u8>, String> {
+    if let ResolvedValue::String(who) = options.iter().find(|opt| opt.name == "who").unwrap().value {
+        let query = query("MATCH (n {name: $name})-[]->(m) RETURN n, m").param("name", who.to_lowercase());
+        return generate_graph(graph, query, options).await;
     } else {
-        return Err("missing query argument".to_owned());
+        return Err("missing argument".to_owned());
+    }
+}
+
+async fn graph_query_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> Result<Vec<u8>, String> {
+    if let ResolvedValue::String(q) = options.iter().find(|opt| opt.name == "query").unwrap().value {
+        return generate_graph(graph, query(q), options).await;
+    } else {
+        return Err("missing argument".to_owned());
     }
 }
 
@@ -222,7 +252,7 @@ async fn query_command(options: &[ResolvedOption<'_>]) -> String {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("Failed to start subprocess");
+            .expect("Failed to start cypher-shell subprocess");
 
         let _ = thread::scope(|_| {
             proc.stdin.unwrap().write_all(query.as_bytes()).unwrap();
