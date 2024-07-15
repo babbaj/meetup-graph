@@ -284,8 +284,8 @@ async fn discord_bot(graph: Arc<Graph>) {
 async fn main() {
     let config = ConfigBuilder::default()
         .uri("127.0.0.1:7687")
-        //.user("neo4j")
-        //.password("meowmeowmeow")
+        .user("meow")
+        .password("meow")
         .fetch_size(500)
         .max_connections(10)
         .build()
