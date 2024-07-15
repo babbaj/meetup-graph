@@ -1,5 +1,5 @@
 [package]
-name = "meetup-importer"
+name = "meetup-graph"
 version = "0.1.0"
 edition = "2021"
 
