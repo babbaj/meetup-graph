@@ -46,7 +46,9 @@ fn parse_all_relations(row: &Row) -> Vec<String> {
     let mut out = vec![];
     for value in map.value.values() {
         if let BoltType::Node(node) = value {
-            out.push(node.properties.get::<String>("name").unwrap())
+            if let Ok(name) = node.properties.get::<String>("name") {
+                out.push(name);
+            }
         }
     }
 
@@ -224,8 +226,12 @@ async fn generate_graph(graph: &Graph, query: neo4rs::Query, options: &[Resolved
     return Ok(png);
 }
 
+fn find_arg<'a>(name: &str, options: &'a [ResolvedOption<'a>]) -> Option<&'a ResolvedValue<'a>> {
+    return options.iter().find(|opt| opt.name == name).map(|opt| &opt.value);
+}
+
 async fn graph_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> Result<Vec<u8>, String> {
-    if let ResolvedValue::String(who) = options.iter().find(|opt| opt.name == "who").unwrap().value {
+    if let Some(ResolvedValue::String(who)) = find_arg("who", options) {
         let query = query("MATCH (n {name: $name})-[]->(m) RETURN n, m").param("name", who.to_lowercase());
         return generate_graph(graph, query, options).await;
     } else {
@@ -234,7 +240,7 @@ async fn graph_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> Result<
 }
 
 async fn graph_query_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> Result<Vec<u8>, String> {
-    if let ResolvedValue::String(q) = options.iter().find(|opt| opt.name == "query").unwrap().value {
+    if let Some(ResolvedValue::String(q)) = find_arg("query", options) {
         return generate_graph(graph, query(q), options).await;
     } else {
         return Err("missing argument".to_owned());
@@ -242,7 +248,7 @@ async fn graph_query_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> R
 }
 
 async fn query_command(options: &[ResolvedOption<'_>]) -> String {
-    if let ResolvedValue::String(query) = options.iter().find(|opt| opt.name == "query").unwrap().value {
+    if let Some(ResolvedValue::String(query)) = find_arg("query", options) {
         let proc = Command::new("cypher-shell")
             .arg("--format=verbose")
             //.arg("-u=neo4j")
