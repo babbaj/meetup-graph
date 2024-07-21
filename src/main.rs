@@ -232,7 +232,7 @@ fn find_arg<'a>(name: &str, options: &'a [ResolvedOption<'a>]) -> Option<&'a Res
 
 async fn graph_command(graph: &Graph, options: &[ResolvedOption<'_>]) -> Result<Vec<u8>, String> {
     if let Some(ResolvedValue::String(who)) = find_arg("who", options) {
-        let query = query("MATCH (n {name: $name})-[]->(m) RETURN n, m").param("name", who.to_lowercase());
+        let query = query("MATCH (n)-[]->(m) WHERE n.name = $name OR m.name = $name RETURN n, m").param("name", who.to_lowercase());
         return generate_graph(graph, query, options).await;
     } else {
         return Err("missing argument".to_owned());
